@@ -1,0 +1,20 @@
+from building import *
+
+# ExLink CMSIS-DAP 引擎 (F3a): 官方 DAP 命令层 + 自写 SWD-over-SPI 传输层。
+# F3a 只编 SWD 路径; SW_DP.c / JTAG_DP.c / SWO.c 已 vendor 但不编 (DAP_JTAG=0 / SWO=0
+# 时 DAP.c 编译掉相应区段, 无悬空符号), 留 F3b。
+
+cwd = GetCurrentDir()
+
+src = [
+    'arm/DAP.c',          # 官方命令处理器 (DAP_Setup/DAP_ExecuteCommand/DAP_Info/Transfer...)
+    'arm/DAP_vendor.c',   # 官方 vendor 命令桩
+    'port/dap_swd_spi.c', # 自写: SWJ_Sequence/SWD_Sequence/SWD_Transfer + init (HPM SPI)
+    'port/dap_swd_diag.c',# bring-up 诊断 msh 命令 (可删; 共享符号见 dap_swd_spi_priv.h)
+]
+
+CPPPATH = [cwd + '/arm', cwd + '/port']   # 暴露 DAP.h + 我们的 DAP_config.h
+
+group = DefineGroup('cmsis-dap', src, depend = [], CPPPATH = CPPPATH)
+
+Return('group')

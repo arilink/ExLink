@@ -39,9 +39,12 @@
 #define CONFIG_USB_ALIGN_SIZE 4
 #endif
 
-/* descriptor common define */
-#define USBD_VID           0x34B7 /* HPMicro VID */
-#define USBD_PID           0xFFFF
+/* descriptor common define
+ * ExLink: VID/PID 的单一真相源是 frame_proto.h (EXLINK_USB_VID/PID, 属跨端契约)。
+ * 这里保持与之一致, 供引用 USBD_VID 的通用 CherryUSB 代码使用。
+ */
+#define USBD_VID           0x34B7 /* HPMicro VID (= EXLINK_USB_VID) */
+#define USBD_PID           0x0E11 /* ExLink 占位 PID (= EXLINK_USB_PID); 待 doc 08 正式分配 */
 #define USBD_MAX_POWER     200
 
 /* attribute data into no cache ram */
