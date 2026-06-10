@@ -1,0 +1,37 @@
+# ===== Build output =====
+/build/
+/flash_debug/
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.asm
+
+# ===== Python / SCons cache =====
+__pycache__/
+*.pyc
+.sconsign.dblite
+
+# ===== RT-Thread / menuconfig generated =====
+.config.old
+*.orig
+*.bak
+
+# ===== Editor / OS cruft =====
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== IDE local prefs (keep .cproject/.project/.config + .settings/.rtmenus + .rttlaunch) =====
+.settings/projcfg.ini
+.settings/language.settings.xml
+.settings/org.eclipse.core.resources.prefs
+.settings/org.eclipse.core.runtime.prefs
+
+# ===== Local-only agent guide (not published to GitHub) =====
+CLAUDE.md
