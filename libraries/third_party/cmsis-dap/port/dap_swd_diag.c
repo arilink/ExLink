@@ -106,6 +106,37 @@ static int swd_id(int argc, char **argv)
 }
 MSH_CMD_EXPORT(swd_id, SWD bring-up: connect + read DPIDR raw (bypass pyOCD/LA));
 
+/* swd_freq [mhz]: 设 SWCLK 频率 (默认 10) + 自测连接读 DPIDR, 用于扫 5361 SWCLK 上限。
+ *   先打印 SPI1 时钟源频率 (SCLK 硬件上限 = src/2), 再设频, 再读 DPIDR 验该频率可用。
+ *   读对 DPIDR=0x1BA01477 -> 该频率 OK; 错 -> 超频或采样失稳, 退回上一档。
+ *   典型扫法 (接目标): swd_freq 10 -> swd_freq 20 -> swd_freq 30 ... 直到读错, 定上限。 */
+static int swd_freq(int argc, char **argv)
+{
+    uint32_t mhz = (argc >= 2) ? (uint32_t)atoi(argv[1]) : 10u;
+    if (mhz == 0u) { mhz = 1u; }
+    uint32_t hz = mhz * 1000000u;
+
+    uint32_t src = board_init_spi_clock(EXLINK_DAP_SPI_BASE);   /* SPI1 时钟源 */
+    rt_kprintf("swd_freq: SPI1 clk src = %u Hz (SCLK max ~= src/2 = %u Hz)\n",
+               src, src / 2u);
+
+    dap_swd_spi_set_clock(hz);     /* 设频 (内部超 src 会 clamp 到 src) */
+    dap_swd_spi_init();            /* 重置 SPI 到当前参数态 (含新频率) */
+    dap_swd_spi_set_clock(hz);     /* init 会用 DEFAULT 复位频率, 这里再设回请求值 */
+
+    swd_send_connect();
+    uint32_t data = 0;
+    uint8_t  ack  = SWD_Transfer(DAP_TRANSFER_RnW, &data);
+
+    rt_kprintf("swd_freq: req %u MHz  ACK(3bit)=0x%X  DPIDR=0x%08X -> %s\n",
+               mhz, ack & 7u, data,
+               ((ack & 7u) == DAP_TRANSFER_OK && data == 0x1BA01477u) ? "OK (freq usable)"
+             : ((ack & 7u) == DAP_TRANSFER_OK) ? "ACK OK but DPIDR unexpected (check target)"
+             : "FAIL (overclock/sampling unstable, back off)");
+    return 0;
+}
+MSH_CMD_EXPORT(swd_freq, set SWCLK freq MHz + selftest read DPIDR to sweep 5361 ceiling: swd_freq [mhz]);
+
 /* swd_read: 连接序列 -> 读 DPIDR, 重点报告 ACK (目标到底有没有回应)。
  * bring-up 第二步 —— swd_seq 波形确认 OK 后, 接目标板跑本命令:
  *   ACK=OK         -> 目标在线且回应, DPIDR 应 = 0x1BA01477 (STM32F103)
@@ -129,13 +160,13 @@ static int swd_read(int argc, char **argv)
         rt_kprintf("OK  DPIDR=0x%08X%s\n", data,
                    (ack & DAP_TRANSFER_ERROR) ? "  (PARITY ERR!)" : "");
         if (!(ack & DAP_TRANSFER_ERROR) && data != 0u && data != 0xFFFFFFFFu) {
-            rt_kprintf("swd_read: >>> 目标回 ACK 且 DPIDR 有效, LINK UP <<<\n");
+            rt_kprintf("swd_read: >>> target ACKed and DPIDR valid, LINK UP <<<\n");
         }
         break;
-    case DAP_TRANSFER_WAIT:  rt_kprintf("WAIT (目标在线, 该次忙)\n");  break;
-    case DAP_TRANSFER_FAULT: rt_kprintf("FAULT (目标在线, 报错)\n");   break;
+    case DAP_TRANSFER_WAIT:  rt_kprintf("WAIT (target online, busy this xfer)\n");  break;
+    case DAP_TRANSFER_FAULT: rt_kprintf("FAULT (target online, error)\n");   break;
     default:
-        rt_kprintf("无有效 ACK -> 目标未驱动 (没接好/三态对顶/采样沿). 跑 swd_trit 查三态.\n");
+        rt_kprintf("no valid ACK -> target not driving (bad wire/tri-state clash/sample edge). run swd_trit.\n");
         break;
     }
     return 0;
@@ -221,13 +252,13 @@ static int swd_pwr(int argc, char **argv)
 
     rt_kprintf("swd_pwr: cfg{read_cpha=%d trn=%d} ADIv5 power-up:\n", s_read_even, s_trn);
     if ((swd_powerup_prologue(NULL) & 7u) != DAP_TRANSFER_OK) {
-        rt_kprintf("swd_pwr: power-up FAILED (见上面卡住的步骤)\n");
+        rt_kprintf("swd_pwr: power-up FAILED (see stuck step above)\n");
         return 0;
     }
     ack = ap_read(AP_IDR, &idr);
     rt_kprintf("  [AP IDR] ACK=%s  IDR=0x%08X\n", ack_str(ack), idr);
     if ((ack & 7u) == DAP_TRANSFER_OK && idr != 0u && idr != 0xFFFFFFFFu) {
-        rt_kprintf("swd_pwr: >>> 调试域已上电 + AP 在线, MEM-AP READY <<<\n");
+        rt_kprintf("swd_pwr: >>> debug domain powered + AP online, MEM-AP READY <<<\n");
     }
     return 0;
 }
@@ -332,13 +363,13 @@ static int swd_pin(int argc, char **argv)
 
     rt_kprintf("swd_pin PA29(SWDIO) GPIO-in: pull-up=%d  pull-down=%d\n", hi, lo);
     if (hi == 1 && lo == 0)
-        rt_kprintf("  => 悬空(跟随内部拉): 无外部驱动 -> SPI 读0 = MOSI 未三态 (固件/SPI 配置)\n");
+        rt_kprintf("  => floating (follows internal pull): no external drive -> SPI reads 0 = MOSI not tri-stated (fw/SPI cfg)\n");
     else if (hi == 0 && lo == 0)
-        rt_kprintf("  => 输入恒低: 弱上拉拉不动, 外部有强下拉/驱动\n");
+        rt_kprintf("  => input stuck LOW: weak pull-up cannot win, external strong pull-down/drive\n");
     else if (hi == 1 && lo == 1)
-        rt_kprintf("  => 输入恒高: 外部强上拉/驱动\n");
+        rt_kprintf("  => input stuck HIGH: external strong pull-up/drive\n");
     else
-        rt_kprintf("  => 异常组合\n");
+        rt_kprintf("  => abnormal combo\n");
 
     /* ---- 推挽输出自测: 证明 pad 能驱动 + 读路径正常, 并区分外部下拉 vs 死短路 ---- */
     HPM_IOC->PAD[IOC_PAD_PA29].PAD_CTL = IOC_PAD_PAD_CTL_DS_SET(7);   /* 最强驱动, 不带内部拉 */
@@ -353,10 +384,10 @@ static int swd_pin(int argc, char **argv)
 
     rt_kprintf("swd_pin PA29 push-pull selftest: out-high reads %d, out-low reads %d\n", oh, ol);
     if (oh == 1 && ol == 0) {
-        rt_kprintf("  => pad 能驱动且读路径正常。结合上面输入恒低 => SWDIO 网上有外部下拉电阻/缓冲器\n");
-        rt_kprintf("     (建议: 量 PA29 对地/对电源电阻; 查原理图 SWDIO 网有无 pull-down 或方向缓冲)\n");
+        rt_kprintf("  => pad drives & read-path OK. With input-stuck-low above => SWDIO net has external pull-down/buffer\n");
+        rt_kprintf("     (tip: measure PA29 R-to-GND/VDD; check schematic SWDIO net for pull-down or direction buffer)\n");
     } else if (oh == 0) {
-        rt_kprintf("  => 输出高都读回 0 => PA29 对地死短路, 或读路径异常 -> 万用表量 PA29 对 GND 电阻\n");
+        rt_kprintf("  => out-high reads 0 => PA29 shorted to GND, or read-path fault -> ohmmeter PA29-to-GND\n");
     }
 
     dap_swd_spi_init();   /* 还原 SPI 复用 + SWD 上拉 */
@@ -375,7 +406,7 @@ static int swd_drive(int argc, char **argv)
     HPM_IOC->PAD[IOC_PAD_PA29].PAD_CTL  = IOC_PAD_PAD_CTL_DS_SET(7);
     gpio_write_pin(HPM_GPIO0, GPIO_DO_GPIOA, 29u, (uint8_t)lvl);
     gpio_set_pin_output(HPM_GPIO0, GPIO_DO_GPIOA, 29u);
-    rt_kprintf("swd_drive: PA29 = %d (push-pull). 用万用表量 PA29 对地电压.\n", lvl);
+    rt_kprintf("swd_drive: PA29 = %d (push-pull). Measure PA29-to-GND voltage.\n", lvl);
     return 0;
 }
 MSH_CMD_EXPORT(swd_drive, park PA29/SWDIO at fixed level for voltage probing: swd_drive 0|1);
@@ -389,7 +420,7 @@ static int swd_clk(int argc, char **argv)
     HPM_IOC->PAD[IOC_PAD_PA27].PAD_CTL  = IOC_PAD_PAD_CTL_DS_SET(7);
     gpio_write_pin(HPM_GPIO0, GPIO_DO_GPIOA, 27u, (uint8_t)lvl);
     gpio_set_pin_output(HPM_GPIO0, GPIO_DO_GPIOA, 27u);
-    rt_kprintf("swd_clk: PA27 = %d (push-pull). 量目标 PA14 对地电压.\n", lvl);
+    rt_kprintf("swd_clk: PA27 = %d (push-pull). Measure target PA14-to-GND voltage.\n", lvl);
     return 0;
 }
 MSH_CMD_EXPORT(swd_clk, park PA27/SWCLK at fixed level for continuity probing: swd_clk 0|1);
@@ -403,7 +434,7 @@ static int swd_rdtest(int argc, char **argv)
     (void)argc; (void)argv;
     dap_swd_spi_init();
 
-    rt_kprintf("swd_rdtest: 把 MISO(PA28)/SWDIO 接 3.3V 或 GND, 看 MISO 读回值:\n");
+    rt_kprintf("swd_rdtest: tie MISO(PA28)/SWDIO to 3.3V or GND, watch MISO read value:\n");
     for (int i = 0; i < 8; i++) {
         uint32_t v = swd_read_bits(8);   /* 全双工: MOSI 出 1, 采 MISO */
         rt_kprintf("  read[%d] = 0x%02X\n", i, v & 0xFFu);
@@ -431,11 +462,11 @@ static int swd_trit(int argc, char **argv)
     rt_kprintf("swd_trit: after-drive-LOW read=0x%02X  after-drive-HIGH read=0x%02X\n",
                a & 0xFFu, b & 0xFFu);
     if ((a & 0xFFu) == 0xFFu && (b & 0xFFu) == 0xFFu)
-        rt_kprintf("  => 两次都 0xFF: 读相位 MOSI 真三态(跟随内部上拉). 三态 OK -> 根因在采样沿/时序, 不是对顶.\n");
+        rt_kprintf("  => both 0xFF: read-phase MOSI truly tri-stated (follows pull-up). tri-state OK -> root cause is sample edge/timing, not clash.\n");
     else if ((a & 0xFFu) != (b & 0xFFu))
-        rt_kprintf("  => 读到=上次写的值! 读相位 MOSI 没三态 -> 和目标对顶 = ACK 恒0 根因. 需改硬件或换读法.\n");
+        rt_kprintf("  => read = last written value! read-phase MOSI not released -> clashes with target = ACK-stuck-0 root cause. need hw change or other read method.\n");
     else
-        rt_kprintf("  => 两次相同但非0xFF(0x%02X): 线被固定外部源主导, 查接线/板载 buffer.\n", a & 0xFFu);
+        rt_kprintf("  => both same but not 0xFF(0x%02X): line dominated by fixed external source, check wiring/onboard buffer.\n", a & 0xFFu);
     return 0;
 }
 MSH_CMD_EXPORT(swd_trit, decisive tri-state test no target needed: drive then read detect MOSI release);
@@ -453,7 +484,7 @@ static int swd_rst(int argc, char **argv)
     rt_kprintf("swd_rst: NRST(PA26) LOW for %d ms ...\n", ms);
     uint8_t lvl = dap_swd_nreset_pulse((uint32_t)ms);
     rt_kprintf("swd_rst: released, PA26 reads %d %s\n", lvl,
-               lvl ? "(高: 目标上拉/内部上拉 OK)" : "(低: 仍被拉低? 查接线/目标按住复位)");
+               lvl ? "(high: target/internal pull-up OK)" : "(low: still held? check wiring/target in reset)");
     return 0;
 }
 MSH_CMD_EXPORT(swd_rst, pulse target NRST(PA26) low then release: swd_rst [ms]);
@@ -465,7 +496,7 @@ static int swd_rstlvl(int argc, char **argv)
 {
     int lvl = (argc >= 2) ? (atoi(argv[1]) != 0) : 1;
     dap_swd_nreset_park((uint8_t)lvl);
-    rt_kprintf("swd_rstlvl: PA26 = %d (push-pull). 量 PA26 对地电压 (高应≈VDD, 低应≈0).\n", lvl);
+    rt_kprintf("swd_rstlvl: PA26 = %d (push-pull). Measure PA26-to-GND voltage (high ~= VDD, low ~= 0).\n", lvl);
     return 0;
 }
 MSH_CMD_EXPORT(swd_rstlvl, park NRST(PA26) at fixed level for voltage probing: swd_rstlvl 0|1);

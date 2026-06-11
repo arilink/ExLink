@@ -46,8 +46,10 @@ extern "C" {
 #define EXLINK_DAP_SWD_TWO_WIRE   0
 #endif
 
-/* bring-up SWCLK 频率 (保守 1MHz; §8 物理上限 50MHz, 绿了再升) */
-#define EXLINK_DAP_SWCLK_HZ_DEFAULT   1000000u
+/* 默认 SWCLK 频率: 10MHz (上电保守默认; 5361 实测 SWD 稳定到 40MHz —— SPI 引擎物理上限,
+ * 时钟源 80MHz / 2 分频, 40M 下读 DPIDR 仍正确)。host 端 pyOCD 可经 DAP_SWJ_Clock
+ * 动态请求更高 (直达 dap_swd_spi_set_clock, 自动 clamp 到 src)。§8 物理上限 50MHz。 */
+#define EXLINK_DAP_SWCLK_HZ_DEFAULT   10000000u
 
 /* 初始化 DAP 的 SPI 外设 + 引脚 (clock / format=Mode0 LSB-first / mosi_bidir)。
  * 由 usb_if_dap_add() 在 usbd_initialize() 之前调用一次。 */
